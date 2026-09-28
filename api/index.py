@@ -3,10 +3,36 @@ import requests
 from bs4 import BeautifulSoup
 import json
 import io
+import re
 
 app = Flask(__name__)
 
 
+# ==================== HD UPGRADE ====================
+def upgrade_to_hd(url):
+    """
+    Snapchat CDN thumbnail ko HD me upgrade karta hai
+    _RS0,90_  →  _RS0,1440_   (full HD)
+    uc=25     →  uc=100       (best quality)
+    """
+    if not url:
+        return url
+
+    original = url
+
+    # Method 1: RS0,90 → RS0,1440 (biggest)
+    url = re.sub(r'_RS\d+,\d+_', '_RS0,1440_', url)
+
+    # Method 2: uc=25 → uc=100
+    url = re.sub(r'uc=\d+', 'uc=100', url)
+
+    if url != original:
+        print(f"✅ HD: {original[:60]}... → {url[:60]}...")
+
+    return url
+
+
+# ==================== SNAPCHAT FETCH ====================
 def fetch_snapchat_profile(username):
     username = username.lower().replace("@", "").strip()
 
@@ -122,13 +148,16 @@ def try_html_meta(username):
 
 
 def normalize(profile, username):
-    pic = (
+    raw_pic = (
         profile.get("profile_picture")
         or profile.get("profilePictureUrl")
         or profile.get("bitmoji_avatar")
         or profile.get("bitmoji")
         or ""
     )
+
+    # ✅ HD upgrade
+    hd_pic = upgrade_to_hd(raw_pic)
 
     return {
         "username": profile.get("username") or username,
@@ -157,8 +186,12 @@ def normalize(profile, username):
             or "Not search my profile"
         ),
         "profile_link": f"https://www.snapchat.com/add/{username}",
-        "profile_picture": pic,
-        "snapcode": profile.get("snapcode") or f"https://app.snapchat.com/web/deeplink/snapcode?username={username}&type=SVG&bitmoji=enable",
+        "profile_picture": hd_pic,           # HD
+        "profile_picture_thumb": raw_pic,    # original thumbnail
+        "snapcode": profile.get("snapcode") or (
+            f"https://app.snapchat.com/web/deeplink/snapcode"
+            f"?username={username}&type=PNG&bitmoji=enable&size=1000"
+        ),
         "category": profile.get("category") or "",
         "website": profile.get("website") or profile.get("websiteUrl") or "",
     }
@@ -167,7 +200,7 @@ def normalize(profile, username):
 # ==================== FLASK ROUTES ====================
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "service": "Snapchat Lookup API"})
+    return jsonify({"status": "ok", "service": "Snapchat Lookup API HD"})
 
 
 @app.route('/api/snap/<username>')
