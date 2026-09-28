@@ -1,43 +1,207 @@
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify, send_file
 import requests
+from bs4 import BeautifulSoup
+import json
+import io
 
 app = Flask(__name__)
 
-@app.route('/vehicleinfo', methods=['GET'])
-def vehicleinfo():
-    vehicle_number = request.args.get('reg', '').upper()
-    
-    if not vehicle_number:
-        return jsonify({"success": False, "error": "No registration number"})
-    
-    url = "https://api-ct.vehicleinfo.app/gw/plt/bffctsvc/api/v1/garage/rc-search"
-    params = {'registration_number': vehicle_number}
-    
+
+def fetch_snapchat_profile(username):
+    username = username.lower().replace("@", "").strip()
+
+    result = try_web_api(username)
+    if result:
+        return result
+
+    result = try_next_data(username)
+    if result:
+        return result
+
+    result = try_html_meta(username)
+    if result:
+        return result
+
+    return None
+
+
+def try_web_api(username):
+    url = f"https://www.snapchat.com/web-api/v1/public-profile/{username}"
     headers = {
-        'User-Agent': "okhttp/4.12.0",
-        'Accept': "application/json, text/plain, */*",
-        'Accept-Encoding': "gzip",
-        'authorization': "Bearer eyJhbGciOiJFUzI1NiIsImtpZCI6IjI2YjM0NDgwLWQ5ZDEtNDQ4NS1iYzczLTRiN2IxOGJiOWUyNCIsInR5cCI6IkpXVCJ9.eyJhdWQiOltdLCJjbGllbnRfaWQiOiJjbGllbnRfWXVGVmVodWdxV2tOTkJLOTNIZ1Q0dyIsImV4cCI6MTc4OTkyMTIxNiwiZXh0Ijp7Imdyb3VwX2lkIjoiNThhNGQ5MzEtMTZhZi00MGY5LWI0ZmYtOGExNDU4YzA2ZjNkIiwic2Vzc2lvbl9pZCI6ImEyNWVhMWMxLTBiZTMtNDY2NS05MjIyLWMyOWNlZjM5M2Y5NiIsInVzZXJfdHlwZSI6IkVYVEVSTkFMIn0sImlhdCI6MTc4ODcxMTYxNSwiaXNzIjoiaHR0cHM6Ly9hdXRoLmNhcnMyNC5jb20vIiwianRpIjoiMDNlNDNhMzItOGU3Yy00ODRhLTlmYzktYTc1MjBlNmM1YjIyIiwibmJmIjoxNzg4NzExNjE1LCJzY3AiOlsib2ZmbGluZV9hY2Nlc3MiXSwic3ViIjoiNmY0YWQ5ZjktOGRiMy00NGVlLWFhNDUtZjJlM2Q1YTYxNmQxIn0.p96b8srL3ybB0lMC-B9HN-0lpsFr4q5kGgOTLbXpoK26wDwbOp4EY-b0SpcZdyJn8ysIqb5CbTzFQEY2Z4fE5g",
-        'x-user-city-id': "777",
-        'super_app_source': "vehicleinfo_consumerapp",
-        'x-api-key': "c91f6a2e4b78d0c5a31b2f8d7e09c3fa",
-        'x_app_instance_id': "547247478ea8e416185d98fbeb629954",
-        'x-device-id': "547247478ea8e416185d98fbeb629954",
-        'x-tenant-id': "VI_INDIA",
-        'userid': "6f4ad9f9-8db3-44ee-aa45-f2e3d5a616d1",
-        'x_experiment_id': "252935e1-2b91-4b74-9734-9a40037cd09f",
-        'clientid': "vehicleinfo_consumerapp",
-        'appversion': "323",
-        'osname': "android",
-        'useragent': "vehicleinfo_consumerapp/323",
-        'source': "MobileApp",
-        'x_country': "IN",
-        'x-tenant-slug': "vehicleinfo"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Referer": f"https://www.snapchat.com/add/{username}",
     }
-    
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=15)
-        data = response.json()
-        return jsonify({"success": True, "data": data})
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            profile = data.get("data", {}).get("me", {}) or data.get("data", {})
+            if profile.get("username"):
+                return normalize(profile, username)
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+        print(f"⚠️ Web API failed: {e}")
+    return None
+
+
+def try_next_data(username):
+    url = f"https://www.snapchat.com/add/{username}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120.0.0.0 Safari/537.36",
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+        script = soup.find("script", {"id": "__NEXT_DATA__"})
+        if not script:
+            return None
+        data = json.loads(script.string)
+        profile = extract_profile_from_next(data, username)
+        if profile:
+            return normalize(profile, username)
+    except Exception as e:
+        print(f"⚠️ Next data failed: {e}")
+    return None
+
+
+def extract_profile_from_next(data, username):
+    def find_profile(obj, depth=0):
+        if depth > 10:
+            return None
+        if isinstance(obj, dict):
+            if obj.get("username", "").lower() == username:
+                return obj
+            for v in obj.values():
+                r = find_profile(v, depth + 1)
+                if r:
+                    return r
+        elif isinstance(obj, list):
+            for item in obj:
+                r = find_profile(item, depth + 1)
+                if r:
+                    return r
+        return None
+    return find_profile(data)
+
+
+def try_html_meta(username):
+    url = f"https://www.snapchat.com/add/{username}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120.0.0.0 Safari/537.36",
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(r.text, "html.parser")
+        profile = {"username": username}
+
+        og_title = soup.find("meta", {"property": "og:title"})
+        if og_title:
+            profile["display_name"] = og_title.get("content", "").replace(" | Snapchat", "")
+
+        og_desc = soup.find("meta", {"property": "og:description"})
+        if og_desc:
+            profile["bio"] = og_desc.get("content", "")
+
+        og_img = soup.find("meta", {"property": "og:image"})
+        if og_img:
+            profile["profile_picture"] = og_img.get("content", "")
+
+        if profile.get("display_name") or profile.get("bio"):
+            return normalize(profile, username)
+    except Exception as e:
+        print(f"⚠️ HTML meta failed: {e}")
+    return None
+
+
+def normalize(profile, username):
+    pic = (
+        profile.get("profile_picture")
+        or profile.get("profilePictureUrl")
+        or profile.get("bitmoji_avatar")
+        or profile.get("bitmoji")
+        or ""
+    )
+
+    return {
+        "username": profile.get("username") or username,
+        "display_name": (
+            profile.get("display_name")
+            or profile.get("displayName")
+            or profile.get("title")
+            or profile.get("name")
+            or "N/A"
+        ),
+        "verified": "Yes" if (
+            profile.get("verified")
+            or profile.get("isVerified")
+            or profile.get("is_verified")
+        ) else "No",
+        "subscribers": str(
+            profile.get("subscriber_count")
+            or profile.get("subscriberCount")
+            or profile.get("subscribers")
+            or 0
+        ),
+        "bio": (
+            profile.get("bio")
+            or profile.get("description")
+            or profile.get("bioText")
+            or "Not search my profile"
+        ),
+        "profile_link": f"https://www.snapchat.com/add/{username}",
+        "profile_picture": pic,
+        "snapcode": profile.get("snapcode") or f"https://app.snapchat.com/web/deeplink/snapcode?username={username}&type=SVG&bitmoji=enable",
+        "category": profile.get("category") or "",
+        "website": profile.get("website") or profile.get("websiteUrl") or "",
+    }
+
+
+# ==================== FLASK ROUTES ====================
+@app.route('/')
+def home():
+    return jsonify({"status": "ok", "service": "Snapchat Lookup API"})
+
+
+@app.route('/api/snap/<username>')
+@app.route('/snap/<username>')
+def snap_lookup(username):
+    try:
+        data = fetch_snapchat_profile(username)
+        if not data:
+            return jsonify({
+                "success": False,
+                "error": "User not found or Snapchat blocked the request"
+            }), 404
+
+        return jsonify({"success": True, "data": data})
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/snap/<username>/photo')
+@app.route('/snap/<username>/photo')
+def snap_photo(username):
+    try:
+        data = fetch_snapchat_profile(username)
+        if not data or not data.get("profile_picture"):
+            return jsonify({"error": "No photo"}), 404
+
+        img_url = data["profile_picture"]
+        r = requests.get(img_url, timeout=10)
+        if r.status_code == 200:
+            return send_file(
+                io.BytesIO(r.content),
+                mimetype=r.headers.get("Content-Type", "image/jpeg")
+            )
+        return jsonify({"error": "Failed to fetch image"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
